@@ -12,6 +12,7 @@
 #include <thread>
 #include <vector>
 #include <fstream>
+#include <csignal>
 
 
 // command-line parameters
@@ -41,6 +42,8 @@ struct whisper_params {
     std::string model     = "models/ggml-base.en.bin";
     std::string fname_out;
 };
+
+bool m_should_listen = true;
 
 void whisper_print_usage(int argc, char ** argv, const whisper_params & params);
 
@@ -72,6 +75,7 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
         else if (arg == "-sa"   || arg == "--save-audio")    { params.save_audio    = true; }
         else if (arg == "-ng"   || arg == "--no-gpu")        { params.use_gpu       = false; }
         else if (arg == "-fa"   || arg == "--flash-attn")    { params.flash_attn    = true; }
+        else if (arg == "-nt"   || arg == "--no-timestamps") { params.no_timestamps = true; }
 
         else {
             fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
@@ -109,7 +113,21 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
     fprintf(stderr, "  -sa,      --save-audio    [%-7s] save the recorded audio to a file\n",              params.save_audio ? "true" : "false");
     fprintf(stderr, "  -ng,      --no-gpu        [%-7s] disable GPU inference\n",                          params.use_gpu ? "false" : "true");
     fprintf(stderr, "  -fa,      --flash-attn    [%-7s] flash attention during inference\n",               params.flash_attn ? "true" : "false");
+    fprintf(stderr, "  -nt,      --no-timestamps [%-7s] do not output timestamps\n",                       params.no_timestamps ? "true" : "false");
     fprintf(stderr, "\n");
+}
+
+void signalHandler(int signum) {
+    switch (signum) {
+        case SIGUSR1:
+            m_should_listen = false;
+            break;
+        case SIGUSR2:
+            m_should_listen = true;
+            break;
+        default:
+            break;
+    }
 }
 
 int main(int argc, char ** argv) {
@@ -131,7 +149,7 @@ int main(int argc, char ** argv) {
 
     const int n_new_line = !use_vad ? std::max(1, params.length_ms / params.step_ms - 1) : 1; // number of steps to print new line
 
-    params.no_timestamps  = !use_vad;
+    // params.no_timestamps  = !use_vad;
     params.no_context    |= use_vad;
     params.max_tokens     = 0;
 
@@ -142,6 +160,10 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "%s: audio.init() failed!\n", __func__);
         return 1;
     }
+
+    // Install the signal handler for USR1 and USR2
+    std::signal(SIGUSR1, signalHandler);
+    std::signal(SIGUSR2, signalHandler);
 
     audio.resume();
 
@@ -219,7 +241,7 @@ int main(int argc, char ** argv) {
 
         wavWriter.open(filename, WHISPER_SAMPLE_RATE, 16, 1);
     }
-    printf("[Start speaking]\n");
+    printf("[LISTENING]\n");
     fflush(stdout);
 
     auto t_last  = std::chrono::high_resolution_clock::now();
@@ -297,7 +319,7 @@ int main(int argc, char ** argv) {
         }
 
         // run the inference
-        {
+        if (m_should_listen) {
             whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
 
             wparams.print_progress   = false;
@@ -339,9 +361,9 @@ int main(int argc, char ** argv) {
                     const int64_t t1 = (t_last - t_start).count()/1000000;
                     const int64_t t0 = std::max(0.0, t1 - pcmf32.size()*1000.0/WHISPER_SAMPLE_RATE);
 
-                    printf("\n");
-                    printf("### Transcription %d START | t0 = %d ms | t1 = %d ms\n", n_iter, (int) t0, (int) t1);
-                    printf("\n");
+                    fprintf(stderr, "\n");
+                    fprintf(stderr, "### Transcription %d START | t0 = %d ms | t1 = %d ms\n", n_iter, (int) t0, (int) t1);
+                    fprintf(stderr, "\n");
                 }
 
                 const int n_segments = whisper_full_n_segments(ctx);
@@ -381,8 +403,8 @@ int main(int argc, char ** argv) {
                 }
 
                 if (use_vad) {
-                    printf("\n");
-                    printf("### Transcription %d END\n", n_iter);
+                    fprintf(stderr, "\n");
+                    fprintf(stderr, "### Transcription %d END\n", n_iter);
                 }
             }
 
@@ -408,6 +430,8 @@ int main(int argc, char ** argv) {
                 }
             }
             fflush(stdout);
+        } else {
+            audio.clear()
         }
     }
 
